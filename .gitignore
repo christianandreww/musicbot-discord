@@ -1,0 +1,15 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+lavalink/plugins/
+lavalink/logs/
+
+# Real Lavalink config holds credentials - only the .example is committed
+lavalink/application*.yml
+!lavalink/application.example.yml
+
+# Local backups and stray virtualenvs
+*.backup.py
+.venvsource/

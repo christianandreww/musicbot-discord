@@ -1,0 +1,86 @@
+# Copy this to application.yml and fill in the placeholders.
+# application.yml itself is gitignored because it holds real credentials.
+# Lavalink v4 configuration — mounted into the container by docker-compose.yml.
+# Docs: https://lavalink.dev/configuration/
+server:
+  port: 2333
+  # Inside the container this must be 0.0.0.0; docker-compose.yml only maps
+  # the port to 127.0.0.1 on the host, so it is not reachable from outside.
+  address: 0.0.0.0
+
+lavalink:
+  # NOTE: this `plugins` list (indented under `lavalink:`) declares which
+  # plugin JARS to download. Each plugin's SETTINGS go in the separate
+  # top-level `plugins:` block further down. Two different keys, same name.
+  plugins:
+    # YouTube support lives in a plugin — the built-in source is deprecated.
+    # Latest: https://github.com/lavalink-devs/youtube-source/releases
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
+      repository: "https://maven.lavalink.dev/releases"
+    # LavaSrc resolves Spotify links server-side: it fetches track metadata
+    # from the Spotify Web API, then plays a matching source found via the
+    # `providers` list below. Latest: https://github.com/topi314/LavaSrc/releases
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
+      repository: "https://maven.lavalink.dev/releases"
+
+  server:
+    password: "youshallnotpass"        # must match LAVALINK_PASSWORD in .env
+    sources:
+      youtube: false                   # keep the deprecated built-in source off
+      soundcloud: true
+      bandcamp: true
+      twitch: true
+      vimeo: true
+      http: true                       # direct .mp3 links, podcast RSS enclosures, radio
+    filters:                           # required for /volume and /bassboost
+      volume: true
+      equalizer: true
+    bufferDurationMs: 400
+    frameBufferDurationMs: 5000
+    opusEncodingQuality: 10
+    playerUpdateInterval: 5
+
+# ---------------------------------------------------------------------------
+# Top-level plugin SETTINGS. Must start at column zero — not indented under
+# `lavalink:` above, or the plugins never see it.
+# ---------------------------------------------------------------------------
+plugins:
+  youtube:
+    enabled: true
+    clients:
+      - TV              # OAuth client first: plays with the burner's session
+      - MUSIC           # search
+      - WEB             # search / playlists
+      - WEBEMBEDDED
+      - TVHTML5_SIMPLY  # last: its failed bot-checks can taint the session
+    oauth:
+      enabled: true
+      # Leave blank on the first run: Lavalink prints a device-code link in
+      # its log. Open it, sign in with a THROWAWAY Google account, then paste
+      # the refresh token it prints here and restart.
+      # Leave this commented out on the first run - a placeholder value crashes
+      # Lavalink. Once you have a real token from the log, uncomment and paste it.
+      # refreshToken: "PASTE_REFRESH_TOKEN_FROM_BURNER_ACCOUNT"
+  lavasrc:
+    sources:
+      spotify: true
+      applemusic: false      # needs a real mediaAPIToken or Lavalink won't start
+      deezer: false          # needs a decryption key or Lavalink won't start
+      # (SoundCloud needs nothing here — it's a NATIVE Lavalink source,
+      #  enabled under lavalink.server.sources above, and streams directly
+      #  rather than being mirrored.)
+    providers:
+      # Order matters: try an exact ISRC match on YouTube first,
+      # then fall back to a plain title/artist search.
+      - "ytsearch:\"%ISRC%\""
+      - "ytsearch:%QUERY%"
+    spotify:
+      clientId: "YOUR_SPOTIFY_CLIENT_ID"
+      # Rotate this in the Spotify dashboard and paste the new value here.
+      clientSecret: "YOUR_SPOTIFY_CLIENT_SECRET"
+      countryCode: "SG"
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO

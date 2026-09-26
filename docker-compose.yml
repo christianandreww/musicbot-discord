@@ -1,0 +1,20 @@
+# Just Lavalink — the audio engine. The bot itself runs in your venv.
+#
+#   docker compose up -d          start it
+#   docker compose logs -f        watch it (look for "Lavalink is ready")
+#   docker compose restart        after editing application.yml
+#   docker compose down           stop it
+
+services:
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    container_name: lavalink
+    restart: unless-stopped
+    environment:
+      # 512 MB is plenty for a private server. Raise to 1G only if the log
+      # shows GC pressure or you hear stuttering with many listeners.
+      _JAVA_OPTIONS: -Xmx512m
+    ports:
+      - "127.0.0.1:2333:2333"   # loopback only — not reachable from outside
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml
