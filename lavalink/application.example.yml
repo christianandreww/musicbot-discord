@@ -13,10 +13,12 @@ lavalink:
   # plugin JARS to download. Each plugin's SETTINGS go in the separate
   # top-level `plugins:` block further down. Two different keys, same name.
   plugins:
-    # YouTube support lives in a plugin — the built-in source is deprecated.
-    # Latest: https://github.com/lavalink-devs/youtube-source/releases
-    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
-      repository: "https://maven.lavalink.dev/releases"
+    # YouTube now goes through yt-dlp (LavaSrc's `ytdlp` source, below).
+    # The old youtube-source plugin is switched off because it registers
+    # under the same "youtube" name and the two would clash.
+    # TO SWITCH BACK: uncomment these two lines AND set `ytdlp: false` below.
+    # - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
+    #   repository: "https://maven.lavalink.dev/releases"
     # LavaSrc resolves Spotify links server-side: it fetches track metadata
     # from the Spotify Web API, then plays a matching source found via the
     # `providers` list below. Latest: https://github.com/topi314/LavaSrc/releases
@@ -58,14 +60,15 @@ plugins:
       # Leave blank on the first run: Lavalink prints a device-code link in
       # its log. Open it, sign in with a THROWAWAY Google account, then paste
       # the refresh token it prints here and restart.
-      # Leave this commented out on the first run - a placeholder value crashes
-      # Lavalink. Once you have a real token from the log, uncomment and paste it.
+      # Only used by the old youtube-source plugin (currently switched off).
+      # Leave commented out unless you switch back - a placeholder crashes Lavalink.
       # refreshToken: "PASTE_REFRESH_TOKEN_FROM_BURNER_ACCOUNT"
   lavasrc:
     sources:
       spotify: true
       applemusic: false      # needs a real mediaAPIToken or Lavalink won't start
       deezer: false          # needs a decryption key or Lavalink won't start
+      ytdlp: true            # YouTube search + playback via yt-dlp (see `ytdlp:` below)
       # (SoundCloud needs nothing here — it's a NATIVE Lavalink source,
       #  enabled under lavalink.server.sources above, and streams directly
       #  rather than being mirrored.)
@@ -74,6 +77,16 @@ plugins:
       # then fall back to a plain title/artist search.
       - "ytsearch:\"%ISRC%\""
       - "ytsearch:%QUERY%"
+    ytdlp:
+      # Installed into the image by lavalink/Dockerfile.
+      path: "/opt/yt-dlp/yt-dlp_linux"
+      searchLimit: 10
+      # These REPLACE LavaSrc's defaults, so keep "-q", "--no-warnings" and
+      # "-J": LavaSrc parses yt-dlp's output as JSON and any stray warning
+      # text breaks that.
+      customLoadArgs: ["-q", "--no-warnings", "--flat-playlist", "--skip-download", "-J"]
+      # Prefer a direct HTTPS audio stream; Lavalink can't play HLS (m3u8).
+      customPlaybackArgs: ["-q", "--no-warnings", "-f", "bestaudio[protocol=https]/bestaudio", "-J"]
     spotify:
       clientId: "YOUR_SPOTIFY_CLIENT_ID"
       # Rotate this in the Spotify dashboard and paste the new value here.

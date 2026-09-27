@@ -13,3 +13,6 @@ lavalink/application*.yml
 # Local backups and stray virtualenvs
 *.backup.py
 .venvsource/
+
+# Local config/code backups (may contain secrets)
+backups/

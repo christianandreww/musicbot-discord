@@ -24,6 +24,10 @@ class MusicPlayer(wavelink.Player):
         super().__init__(*args, **kwargs)
         self.home: discord.abc.Messageable | None = None
         self.stay: bool = False
+        # /autoplay: when the queue runs out, keep playing similar songs.
+        self.radio: bool = False
+        # /filter: name of the active audio effect, shown in /queue.
+        self.effect: str | None = None
         # After this many seconds with nothing playing, wavelink fires
         # `on_wavelink_inactive_player`. /stay sets this to None (disabled).
         self.inactive_timeout = config.INACTIVE_TIMEOUT

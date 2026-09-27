@@ -1,13 +1,15 @@
 # Just Lavalink — the audio engine. The bot itself runs in your venv.
+# The image is built from lavalink/Dockerfile (stock Lavalink + yt-dlp + Deno).
 #
+#   docker compose build          (re)build the image  — start-bot.bat does this daily
 #   docker compose up -d          start it
 #   docker compose logs -f        watch it (look for "Lavalink is ready")
-#   docker compose restart        after editing application.yml
 #   docker compose down           stop it
 
 services:
   lavalink:
-    image: ghcr.io/lavalink-devs/lavalink:4
+    build:
+      context: ./lavalink   # lavalink/Dockerfile
     container_name: lavalink
     restart: unless-stopped
     environment:

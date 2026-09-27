@@ -1,0 +1,4 @@
+# The image needs nothing from this folder except the Dockerfile.
+# Keeps application.yml (which holds credentials) out of the build context.
+*
+!Dockerfile
