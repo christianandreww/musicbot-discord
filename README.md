@@ -8,13 +8,21 @@ Everything is open to everyone in the server. Commands that change playback need
 
 | | |
 |---|---|
-| **Playing** | `/play` add to the end of the queue · `/playnext` add right after the current song · `/pause` · `/skip` · `/back` previous song · `/seek` jump to a time · `/nowplaying` · `/stop` stop and leave |
+| **Playing** | `/play` add to the end of the queue · `/playnext` add right after the current song · `/pause` (again to resume) · `/resume` · `/skip` · `/back` previous song · `/seek` jump to a time · `/nowplaying` bring the player card back down · `/stop` stop and leave |
 | **Queue** | `/queue` (with page buttons) · `/remove` · `/move` · `/skipto` · `/shuffle` · `/clear` |
 | **Modes** | `/loop` off / current song / queue · `/autoplay` keep playing similar songs when the queue runs out · `/stay` don't leave when idle |
 | **Sound** | `/volume` · `/bassboost` · `/filter` nightcore / vaporwave / 8D |
 | **Other** | `/lyrics` |
 
 `/remove`, `/move` and `/skipto` suggest the queued songs as you type — pick one by name instead of counting positions.
+
+**The player card.** Each song posts a *Now playing* card — artwork, title, a progress bar, what's up next — with buttons like a phone's music controls:
+
+| ⏮️ back | ⏯️ pause / resume | ⏭️ skip | ⏹️ stop | 📜 queue |
+|---|---|---|---|---|
+| 🔀 **shuffle** | 🔁 **loop** (off → queue → song) | 🔉 **volume −10** | 🔊 **volume +10** | 📻 **autoplay** |
+
+Only one card is shown at a time (the newest, at the bottom of the chat), and it updates itself every few seconds. Anyone in the bot's voice channel can use the buttons; 📜 works for everyone. Cards from before a restart stop responding — `/nowplaying` brings up a fresh one.
 
 ## What you're running
 

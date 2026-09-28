@@ -1,6 +1,7 @@
 """Custom Player subclass + small helpers shared by the cogs."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import cast
 
@@ -28,6 +29,10 @@ class MusicPlayer(wavelink.Player):
         self.radio: bool = False
         # /filter: name of the active audio effect, shown in /queue.
         self.effect: str | None = None
+        # The "Now playing" card with media buttons (see cogs/music.py).
+        self.controller: discord.Message | None = None
+        self.controller_view: discord.ui.View | None = None
+        self.controller_task: asyncio.Task | None = None
         # After this many seconds with nothing playing, wavelink fires
         # `on_wavelink_inactive_player`. /stay sets this to None (disabled).
         self.inactive_timeout = config.INACTIVE_TIMEOUT

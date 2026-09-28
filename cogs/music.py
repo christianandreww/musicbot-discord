@@ -136,6 +136,209 @@ async def queue_position_autocomplete(
     return choices
 
 
+TICK_SECONDS = 10  # how often the Now-playing card's progress bar moves
+
+
+def artwork_for(track: wavelink.Playable) -> str | None:
+    """Track artwork; YouTube songs found via yt-dlp search can lack it, so build it."""
+    if track.artwork:
+        return track.artwork
+    if track.source == "youtube" and track.identifier:
+        return f"https://i.ytimg.com/vi/{track.identifier}/hqdefault.jpg"
+    return None
+
+
+def progress_bar(position: int, length: int, width: int = 16) -> str:
+    if length <= 0:
+        return "─" * width
+    filled = min(width - 1, int(width * position / length))
+    return "━" * filled + "●" + "─" * (width - 1 - filled)
+
+
+def build_player_embed(player: MusicPlayer) -> discord.Embed:
+    """The Now-playing card: artwork, title, artist, progress, up next, status."""
+    track = player.current
+    if track is None:
+        return discord.Embed(
+            description="Nothing playing — use `/play` to add songs.",
+            color=discord.Color.dark_grey(),
+        )
+
+    paused = player.paused
+    embed = discord.Embed(
+        title=trunc(track.title, 250),
+        url=track.uri or None,
+        color=discord.Color.light_grey() if paused else discord.Color.blurple(),
+    )
+    embed.set_author(name="⏸️ Paused" if paused else "▶️ Now playing")
+
+    if track.is_stream:
+        progress = "🔴 LIVE"
+    else:
+        pos = min(int(player.position), track.length)
+        progress = f"`{format_ms(pos)}` {progress_bar(pos, track.length)} `{format_ms(track.length)}`"
+    embed.description = f"{track.author or 'Unknown artist'}\n\n{progress}"
+
+    art = artwork_for(track)
+    if art:
+        embed.set_thumbnail(url=art)
+
+    if player.queue:
+        more = len(player.queue) - 1
+        up_next = trunc(player.queue[0].title, 60) + (f"  (+{more} more)" if more else "")
+    elif player.radio:
+        up_next = "📻 Autoplay will pick something similar"
+    else:
+        up_next = "Nothing queued — `/play` to add more"
+    embed.add_field(name="Up next", value=up_next, inline=False)
+
+    status = [f"🔊 {player.volume}%"]
+    if player.queue.mode is wavelink.QueueMode.loop:
+        status.append("🔂 Looping song")
+    elif player.queue.mode is wavelink.QueueMode.loop_all:
+        status.append("🔁 Looping queue")
+    if player.radio:
+        status.append("📻 Autoplay")
+    if player.effect:
+        status.append(f"✨ {player.effect}")
+    embed.set_footer(text=" • ".join(status))
+    return embed
+
+
+class PlayerControls(discord.ui.View):
+    """Media-style buttons under the Now-playing card, like a phone's music controls.
+
+    Anyone in the bot's voice channel can use them (same rule as the slash
+    commands); the 📜 queue button works for everyone.
+    """
+
+    def __init__(self, cog: Music, player: MusicPlayer) -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.player = player
+        self.sync()
+
+    def sync(self) -> None:
+        """Make the buttons match the player: play/pause icon, loop and autoplay highlights."""
+        p = self.player
+        self.pause_resume.emoji = "▶️" if p.paused else "⏸️"
+        mode = p.queue.mode
+        self.loop_mode.emoji = "🔂" if mode is wavelink.QueueMode.loop else "🔁"
+        self.loop_mode.style = (
+            discord.ButtonStyle.success if mode is not wavelink.QueueMode.normal else discord.ButtonStyle.secondary
+        )
+        self.autoplay_toggle.style = discord.ButtonStyle.success if p.radio else discord.ButtonStyle.secondary
+        self.shuffle_queue.disabled = len(p.queue) < 2
+        self.volume_down.disabled = p.volume <= 0
+        self.volume_up.disabled = p.volume >= 150
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if (interaction.data or {}).get("custom_id") == self.show_queue.custom_id:
+            return True  # anyone can look at the queue
+        p = self.player
+        if not p.connected:
+            await interaction.response.send_message("I'm not playing anything right now.", ephemeral=True)
+            return False
+        voice = getattr(interaction.user, "voice", None)
+        if voice is None or voice.channel != p.channel:
+            where = p.channel.mention if p.channel else "my voice channel"
+            await interaction.response.send_message(f"Join {where} to use the controls.", ephemeral=True)
+            return False
+        return True
+
+    async def _redraw(self, interaction: discord.Interaction) -> None:
+        self.sync()
+        await interaction.response.edit_message(embed=build_player_embed(self.player), view=self)
+
+    # ---- row 1: transport controls ----------------------------------------
+
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        ok, msg = await self.cog._go_back(self.player)
+        if not ok:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        await interaction.response.defer()  # the song change posts a fresh card
+
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, row=0)
+    async def pause_resume(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self.player.current is None:
+            await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+            return
+        await self.player.pause(not self.player.paused)
+        await self._redraw(interaction)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    async def skip_track(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        p = self.player
+        if p.current is None:
+            await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        await p.skip(force=True)
+        if not p.queue and not p.radio and p.queue.mode is not wavelink.QueueMode.loop_all:
+            await self.cog._finish_controller(p, "⏹️ Queue finished — use `/play` to add more.")
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    async def stop_player(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.defer()
+        await self.cog._stop_player(self.player, f"⏹️ Stopped by {interaction.user.display_name}.")
+
+    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=0)
+    async def show_queue(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self.player.current is None and not self.player.queue:
+            await interaction.response.send_message("The queue is empty.", ephemeral=True)
+            return
+        view = QueuePages(self.player)
+        embed = view.render()
+        if view.page_count() == 1:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # ---- row 2: modes and volume --------------------------------------------
+
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
+    async def shuffle_queue(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if len(self.player.queue) < 2:
+            await interaction.response.send_message("Not enough songs queued to shuffle.", ephemeral=True)
+            return
+        self.player.queue.shuffle()
+        await self._redraw(interaction)
+
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1)
+    async def loop_mode(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        # Same cycle as most music apps: off -> repeat queue -> repeat song -> off
+        cycle = {
+            wavelink.QueueMode.normal: "queue",
+            wavelink.QueueMode.loop_all: "song",
+            wavelink.QueueMode.loop: "off",
+        }
+        ok, msg = self.cog._apply_loop(self.player, cycle[self.player.queue.mode])
+        if not ok:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        await self._redraw(interaction)
+
+    @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_down(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.player.set_volume(max(0, self.player.volume - 10))
+        await self._redraw(interaction)
+
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_up(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.player.set_volume(min(150, self.player.volume + 10))
+        await self._redraw(interaction)
+
+    @discord.ui.button(emoji="📻", style=discord.ButtonStyle.secondary, row=1)
+    async def autoplay_toggle(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        p = self.player
+        p.radio = not p.radio
+        await self._redraw(interaction)
+        if p.radio and p.current is None and not p.queue:
+            await self.cog._radio_next(p, None)
+
+
 class Music(commands.Cog):
     def __init__(self, bot: MusicBot) -> None:
         self.bot = bot
@@ -162,20 +365,7 @@ class Music(commands.Cog):
         if player is None or player.home is None:
             return
 
-        track = payload.track
-        embed = discord.Embed(
-            title="Now playing",
-            description=f"[{track.title}]({track.uri})" if track.uri else track.title,
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(name="By", value=track.author or "Unknown")
-        embed.add_field(
-            name="Length",
-            value="🔴 LIVE" if track.is_stream else format_ms(track.length),
-        )
-        if track.artwork:
-            embed.set_thumbnail(url=track.artwork)
-        await safe_send(player.home, embed=embed)
+        await self._post_controller(player)
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(
@@ -398,11 +588,146 @@ class Music(commands.Cog):
         p = cast(MusicPlayer, player)
         if p.stay:
             return
-        if p.home is not None:
-            await safe_send(
-                p.home, "👋 Left the voice channel after a while of silence. (`/stay` keeps me in.)"
-            )
+        note = "👋 Left the voice channel after a while of silence. (`/stay` keeps me in.)"
+        if not await self._finish_controller(p, note) and p.home is not None:
+            await safe_send(p.home, note)
         await p.disconnect()
+
+    # ------------------------------------------------------- the player card
+
+    async def _post_controller(self, player: MusicPlayer) -> None:
+        """Post a fresh Now-playing card with buttons, replacing the previous one."""
+        if player.home is None:
+            return
+        old_msg, old_view, old_task = player.controller, player.controller_view, player.controller_task
+        view = PlayerControls(self, player)
+        try:
+            msg = await player.home.send(embed=build_player_embed(player), view=view)
+        except discord.HTTPException as exc:
+            log.debug("Couldn't post the player card: %s", exc)
+            view.stop()
+            return
+        player.controller, player.controller_view = msg, view
+        player.controller_task = asyncio.create_task(self._tick(player, msg))
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+        if old_view is not None:
+            old_view.stop()
+        if old_msg is not None:
+            try:
+                await old_msg.delete()  # keep one card, at the bottom of the chat
+            except discord.HTTPException:
+                pass
+
+    async def _refresh_controller(self, player: MusicPlayer) -> None:
+        """Redraw the card now (after a command changes something it shows)."""
+        msg, view = player.controller, player.controller_view
+        if msg is None or view is None:
+            return
+        view.sync()
+        try:
+            await msg.edit(embed=build_player_embed(player), view=view)
+        except discord.NotFound:  # someone deleted the card
+            player.controller = player.controller_view = None
+        except discord.HTTPException:
+            pass
+
+    async def _finish_controller(self, player: MusicPlayer, text: str) -> bool:
+        """Turn the card into a plain notice without buttons. True if there was a card."""
+        msg, view, task = player.controller, player.controller_view, player.controller_task
+        player.controller = player.controller_view = player.controller_task = None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        if view is not None:
+            view.stop()
+        if msg is None:
+            return False
+        try:
+            await msg.edit(embed=discord.Embed(description=text, color=discord.Color.dark_grey()), view=None)
+        except discord.HTTPException:
+            return False
+        return True
+
+    async def _tick(self, player: MusicPlayer, msg: discord.Message) -> None:
+        """Keep the card's progress bar moving. Discord limits edits, so every few seconds."""
+        idle = 0
+        try:
+            while player.controller is msg:
+                await asyncio.sleep(TICK_SECONDS)
+                if player.controller is not msg:
+                    return  # a newer card took over
+                if not player.connected:
+                    await self._finish_controller(player, "👋 Disconnected.")
+                    return
+                if player.current is None:
+                    idle += 1
+                    # The next song, the queue loop or autoplay may be about to start.
+                    waiting = bool(player.queue) or player.radio or player.queue.mode is wavelink.QueueMode.loop_all
+                    if idle >= 2 or not waiting:
+                        await self._finish_controller(player, "⏹️ Queue finished — use `/play` to add more.")
+                        return
+                    continue
+                idle = 0
+                if not player.paused:
+                    await self._refresh_controller(player)
+        except asyncio.CancelledError:
+            pass
+
+    async def _stop_player(self, player: MusicPlayer, note: str) -> None:
+        """Shared by /stop and the ⏹️ button."""
+        player.queue.clear()
+        player.stay = False
+        await self._finish_controller(player, note)
+        await player.disconnect()
+
+    async def _go_back(self, player: MusicPlayer) -> tuple[bool, str]:
+        """Shared by /back and the ⏮️ button. Returns (ok, message)."""
+        history = player.queue.history
+        current = player.current
+        items = list(history) if history is not None else []
+
+        # The history ends with the current song (added when it started);
+        # the one before that is where we go back to.
+        idx = len(items) - 1
+        while idx >= 0 and current is not None and items[idx].identifier == current.identifier:
+            idx -= 1
+        if idx < 0 or history is None:
+            return False, "There's no previous song yet."
+
+        previous = items[idx]
+        for _ in range(len(items) - idx):  # drop it and everything after it;
+            history.delete(-1)             # play() re-adds it below
+        if current is not None:
+            player.queue.put_at(0, current)  # the song we left comes straight back after
+        player.queue.loaded = previous
+        await player.play(previous)
+        after = f" **{trunc(current.title)}** is up next." if current is not None else ""
+        return True, f"⏮️ Back to **{trunc(previous.title)}**.{after}"
+
+    def _apply_loop(self, player: MusicPlayer, value: str) -> tuple[bool, str]:
+        """Shared by /loop and the 🔁 button. value: "off", "song" or "queue"."""
+        if value == "song":
+            if player.current is None:
+                return False, "Nothing is playing."
+            player.queue.mode = wavelink.QueueMode.loop
+            player.queue.loaded = player.current
+            return True, (
+                f"🔂 Looping **{trunc(player.current.title)}**. "
+                "`/skip` moves on (and loops the next song); `/loop Off` to stop."
+            )
+        if value == "queue":
+            player.queue.mode = wavelink.QueueMode.loop_all
+            # Wavelink refills a looping queue from the play history. Restart
+            # that history at the current song, so the loop is "this song and
+            # everything after it" rather than everything played all session.
+            history = player.queue.history
+            if history is not None:
+                history.clear()
+                if player.current is not None:
+                    history.put(player.current)
+            return True, "🔁 Looping the queue — the current song and everything after it."
+        player.queue.mode = wavelink.QueueMode.normal
+        return True, "➡️ Loop off."
 
     # ---------------------------------------------------------------- commands
 
@@ -556,6 +881,8 @@ class Music(commands.Cog):
 
         if not player.playing:
             await player.play(player.queue.get())
+        else:
+            await self._refresh_controller(player)
 
     @app_commands.command(name="pause", description="Pause or resume playback.")
     @app_commands.guild_only()
@@ -569,6 +896,23 @@ class Music(commands.Cog):
 
         await player.pause(not player.paused)
         await interaction.response.send_message("⏸️ Paused." if player.paused else "▶️ Resumed.")
+        await self._refresh_controller(player)
+
+    @app_commands.command(name="resume", description="Resume playback after /pause.")
+    @app_commands.guild_only()
+    async def resume(self, interaction: discord.Interaction) -> None:
+        player = await get_controllable_player(interaction)
+        if player is None:
+            return
+        if player.current is None:
+            await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+            return
+        if not player.paused:
+            await interaction.response.send_message("It isn't paused.", ephemeral=True)
+            return
+        await player.pause(False)
+        await interaction.response.send_message("▶️ Resumed.")
+        await self._refresh_controller(player)
 
     @app_commands.command(name="skip", description="Skip the current track.")
     @app_commands.guild_only()
@@ -583,6 +927,8 @@ class Music(commands.Cog):
         title = player.current.title
         await player.skip(force=True)
         await interaction.response.send_message(f"⏭️ Skipped **{trunc(title)}**.")
+        if not player.queue and not player.radio and player.queue.mode is not wavelink.QueueMode.loop_all:
+            await self._finish_controller(player, "⏹️ Queue finished — use `/play` to add more.")
 
     @app_commands.command(
         name="seek",
@@ -617,8 +963,11 @@ class Music(commands.Cog):
 
         await player.seek(ms)
         await interaction.response.send_message(f"⏩ Jumped to **{format_ms(ms)}**.")
+        await self._refresh_controller(player)
 
-    @app_commands.command(name="nowplaying", description="Show the current track and progress.")
+    @app_commands.command(
+        name="nowplaying", description="Bring the player card (with buttons) to the bottom of the chat."
+    )
     @app_commands.guild_only()
     async def nowplaying(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
@@ -626,29 +975,10 @@ class Music(commands.Cog):
         if player is None or player.current is None:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
             return
-
-        track = player.current
-        embed = discord.Embed(
-            title=trunc(track.title, 250),
-            url=track.uri or None,
-            description=track.author or "",
-            color=discord.Color.blurple(),
-        )
-        if track.is_stream:
-            embed.add_field(name="Position", value="🔴 LIVE")
-        else:
-            done = int(player.position / track.length * 20) if track.length else 0
-            bar = "▬" * done + "🔘" + "▬" * (20 - done)
-            embed.add_field(
-                name="Position",
-                value=f"`{format_ms(int(player.position))} / {format_ms(track.length)}`\n{bar}",
-                inline=False,
-            )
-        if player.paused:
-            embed.set_footer(text="Paused")
-        if track.artwork:
-            embed.set_thumbnail(url=track.artwork)
-        await interaction.response.send_message(embed=embed)
+        if interaction.channel is not None:
+            player.home = interaction.channel  # the card follows you to this channel
+        await interaction.response.send_message("🎵 Here you go 👇", ephemeral=True)
+        await self._post_controller(player)
 
     @app_commands.command(name="queue", description="Show what's coming up.")
     @app_commands.guild_only()
@@ -681,6 +1011,7 @@ class Music(commands.Cog):
             return
         player.queue.shuffle()
         await interaction.response.send_message("🔀 Shuffled the queue.")
+        await self._refresh_controller(player)
 
     @app_commands.command(name="volume", description="Set playback volume (0–150).")
     @app_commands.describe(level="100 = normal")
@@ -693,6 +1024,7 @@ class Music(commands.Cog):
             return
         await player.set_volume(level)
         await interaction.response.send_message(f"🔊 Volume set to **{level}%**.")
+        await self._refresh_controller(player)
 
     @app_commands.command(name="bassboost", description="Apply a bass-boost equalizer.")
     @app_commands.describe(level="How hard the low end should hit")
@@ -756,12 +1088,10 @@ class Music(commands.Cog):
         if player is None:
             return
 
-        player.queue.clear()
-        player.stay = False
-        await player.disconnect()
         await interaction.response.send_message(
             "⏹️ Stopped playback, cleared the queue, and left the channel."
         )
+        await self._stop_player(player, f"⏹️ Stopped by {interaction.user.display_name}.")
 
     # ------------------------------------------------------------ queue tools
 
@@ -795,6 +1125,7 @@ class Music(commands.Cog):
         track = player.queue[position - 1]
         player.queue.delete(position - 1)
         await interaction.response.send_message(f"🗑️ Removed **{trunc(track.title)}** (was #{position}).")
+        await self._refresh_controller(player)
 
     @app_commands.command(name="move", description="Move a song to a different spot in the queue.")
     @app_commands.describe(
@@ -819,6 +1150,7 @@ class Music(commands.Cog):
         player.queue.delete(position - 1)
         player.queue.put_at(to - 1, track)
         await interaction.response.send_message(f"↕️ Moved **{trunc(track.title)}** to #{to}.")
+        await self._refresh_controller(player)
 
     @app_commands.command(
         name="skipto", description="Jump to a song in the queue, skipping the ones before it."
@@ -854,6 +1186,7 @@ class Music(commands.Cog):
         await interaction.response.send_message(
             f"🧹 Cleared **{count}** song(s). The current song keeps playing."
         )
+        await self._refresh_controller(player)
 
     # -------------------------------------------------------- playback extras
 
@@ -872,31 +1205,12 @@ class Music(commands.Cog):
         if player is None:
             return
 
-        if mode.value == "song":
-            if player.current is None:
-                await interaction.response.send_message("Nothing is playing.", ephemeral=True)
-                return
-            player.queue.mode = wavelink.QueueMode.loop
-            player.queue.loaded = player.current
-            msg = (
-                f"🔂 Looping **{trunc(player.current.title)}**. "
-                "`/skip` moves on (and loops the next song); `/loop Off` to stop."
-            )
-        elif mode.value == "queue":
-            player.queue.mode = wavelink.QueueMode.loop_all
-            # Wavelink refills a looping queue from the play history. Restart
-            # that history at the current song, so the loop is "this song and
-            # everything after it" rather than everything played all session.
-            history = player.queue.history
-            if history is not None:
-                history.clear()
-                if player.current is not None:
-                    history.put(player.current)
-            msg = "🔁 Looping the queue — the current song and everything after it."
-        else:
-            player.queue.mode = wavelink.QueueMode.normal
-            msg = "➡️ Loop off."
+        ok, msg = self._apply_loop(player, mode.value)
+        if not ok:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
         await interaction.response.send_message(msg)
+        await self._refresh_controller(player)
 
     @app_commands.command(name="back", description="Go back to the previous song.")
     @app_commands.guild_only()
@@ -904,29 +1218,8 @@ class Music(commands.Cog):
         player = await get_controllable_player(interaction)
         if player is None:
             return
-        history = player.queue.history
-        current = player.current
-        items = list(history) if history is not None else []
-
-        # The history ends with the current song (added when it started);
-        # the one before that is where we go back to.
-        idx = len(items) - 1
-        while idx >= 0 and current is not None and items[idx].identifier == current.identifier:
-            idx -= 1
-        if idx < 0 or history is None:
-            await interaction.response.send_message("There's no previous song yet.", ephemeral=True)
-            return
-
-        previous = items[idx]
-        for _ in range(len(items) - idx):  # drop it and everything after it;
-            history.delete(-1)             # play() re-adds it below
-        if current is not None:
-            player.queue.put_at(0, current)  # the song we left comes straight back after
-        player.queue.loaded = previous
-        await player.play(previous)
-
-        after = f" **{trunc(current.title)}** is up next." if current is not None else ""
-        await interaction.response.send_message(f"⏮️ Back to **{trunc(previous.title)}**.{after}")
+        ok, msg = await self._go_back(player)
+        await interaction.response.send_message(msg, ephemeral=not ok)
 
     @app_commands.command(
         name="autoplay",
@@ -940,11 +1233,13 @@ class Music(commands.Cog):
         player.radio = not player.radio
         if not player.radio:
             await interaction.response.send_message("📻 Autoplay **off**.")
+            await self._refresh_controller(player)
             return
         await interaction.response.send_message(
             "📻 Autoplay **on** — when the queue runs out, I'll keep playing songs "
             "similar to what's been playing."
         )
+        await self._refresh_controller(player)
         if player.current is None and not player.queue:
             await self._radio_next(player, None)  # nothing playing: start right away
 
@@ -981,6 +1276,7 @@ class Music(commands.Cog):
             await interaction.response.send_message("✨ Effects off.")
         else:
             await interaction.response.send_message(f"✨ Effect set to **{player.effect}**.")
+        await self._refresh_controller(player)
 
 
 async def setup(bot: MusicBot) -> None:
