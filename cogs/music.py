@@ -844,16 +844,41 @@ class Music(commands.Cog):
         # URLs go to Lavalink as-is; plain text is prefixed with the chosen
         # search source. Spotify links are resolved by LavaSrc on the node
         # (metadata -> a matching stream via the `providers` list).
-        try:
-            results: wavelink.Search = await wavelink.Playable.search(
-                query, source=source.value if source else "ytsearch"
+        search_source = source.value if source else "ytsearch"
+        is_url = query.strip().lower().startswith(("http://", "https://"))
+        results: wavelink.Search | None = None
+        # yt-dlp occasionally fails on a single request (YouTube hiccup), which
+        # Lavalink reports as a 500. Try twice, then - for a typed search, not
+        # a link - fall back to searching SoundCloud.
+        attempts = [search_source, search_source]
+        if search_source == "ytsearch" and not is_url:
+            attempts.append("scsearch")
+        last_error: Exception | None = None
+        for i, src in enumerate(attempts):
+            try:
+                results = await wavelink.Playable.search(query, source=src)
+                if src == "scsearch" and search_source != "scsearch" and results:
+                    await interaction.followup.send(
+                        "🔁 YouTube search isn't responding right now — using SoundCloud instead."
+                    )
+                break
+            except wavelink.LavalinkLoadException as exc:
+                log.warning("Load failed for %r: %s", query, exc)
+                await interaction.followup.send(f"❌ Couldn't load that: `{exc.error}`")
+                return
+            except wavelink.InvalidNodeException:
+                await interaction.followup.send("🔌 Lavalink is offline. Try again shortly.")
+                return
+            except wavelink.LavalinkException as exc:
+                last_error = exc
+                log.warning("Search attempt %d (%s) for %r failed: %s", i + 1, src, query, exc)
+                await asyncio.sleep(1)
+        else:
+            log.error("All searches failed for %r: %s", query, last_error)
+            await interaction.followup.send(
+                "⚠️ Lavalink couldn't search for that right now (usually a temporary YouTube "
+                "problem). Try again in a moment, or pick **SoundCloud** as the source."
             )
-        except wavelink.LavalinkLoadException as exc:
-            log.warning("Load failed for %r: %s", query, exc)
-            await interaction.followup.send(f"❌ Couldn't load that: `{exc.error}`")
-            return
-        except wavelink.InvalidNodeException:
-            await interaction.followup.send("🔌 Lavalink is offline. Try again shortly.")
             return
 
         if not results:

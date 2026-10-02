@@ -84,7 +84,10 @@ plugins:
       # These REPLACE LavaSrc's defaults, so keep "-q", "--no-warnings" and
       # "-J": LavaSrc parses yt-dlp's output as JSON and any stray warning
       # text breaks that.
-      customLoadArgs: ["-q", "--no-warnings", "--flat-playlist", "--skip-download", "-J"]
+      # --match-filter drops private/deleted videos from playlists: they have no
+      # channel name, which crashes Lavalink and fails the WHOLE playlist.
+      customLoadArgs: ["-q", "--no-warnings", "--flat-playlist", "--skip-download", "-J",
+                       "--match-filter", "title!~='^\\[(Private|Deleted) video\\]$'"]
       # Prefer a direct HTTPS audio stream; Lavalink can't play HLS (m3u8).
       customPlaybackArgs: ["-q", "--no-warnings", "-f", "bestaudio[protocol=https]/bestaudio", "-J"]
     spotify:
